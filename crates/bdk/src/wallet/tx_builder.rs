@@ -140,7 +140,10 @@ pub struct SilentPaymentAddress;
 
 impl SilentPaymentAddress {
     pub fn placeholder_script_pubkey(&self) -> ScriptBuf {
-        todo!()
+        ScriptBuf::new_witness_program(
+            &bitcoin::address::WitnessProgram::new(bitcoin::address::WitnessVersion::V1, [0u8; 32])
+                .unwrap(),
+        )
     }
 }
 

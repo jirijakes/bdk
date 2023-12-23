@@ -45,7 +45,10 @@ use bitcoin::{
 use core::fmt;
 use core::ops::Deref;
 use descriptor::error::Error as DescriptorError;
-use miniscript::psbt::{PsbtExt, PsbtInputExt, PsbtInputSatisfier};
+use miniscript::{
+    descriptor::DescriptorSecretKey,
+    psbt::{PsbtExt, PsbtInputExt, PsbtInputSatisfier},
+};
 
 use bdk_chain::tx_graph::CalculateFeeError;
 
@@ -78,6 +81,8 @@ use crate::signer::SignerError;
 use crate::types::*;
 use crate::wallet::coin_selection::Excess::{Change, NoChange};
 use crate::wallet::error::{BuildFeeBumpError, CreateTxError, MiniscriptPsbtError};
+
+use self::tx_builder::{Recipient, SilentPaymentAddress};
 
 const COINBASE_MATURITY: u32 = 100;
 
@@ -1394,10 +1399,11 @@ impl<D> Wallet<D> {
 
         for (index, (recipient, value)) in recipients.enumerate() {
             let script_pubkey = match recipient {
-                tx_builder::Recipient::ScriptPubKey(spk) => spk.clone(),
-                tx_builder::Recipient::Address(a) => a.script_pubkey(),
-                tx_builder::Recipient::SilentPayment(sp) => sp.placeholder_script_pubkey(),
+                Recipient::ScriptPubKey(spk) => spk.clone(),
+                Recipient::Address(a) => a.script_pubkey(),
+                Recipient::SilentPayment(sp) => sp.placeholder_script_pubkey(),
             };
+
             if !params.allow_dust
                 && value.is_dust(&script_pubkey)
                 && !script_pubkey.is_provably_unspendable()
@@ -1409,10 +1415,6 @@ impl<D> Wallet<D> {
                 received += value;
             }
 
-            let a: [u8; 8] = (index as u64).to_be_bytes();
-            let mut x = [0u8; 32];
-            x[24..].copy_from_slice(&a);
-
             let new_out = TxOut {
                 script_pubkey: script_pubkey.clone(),
                 value,
@@ -1422,18 +1424,6 @@ impl<D> Wallet<D> {
 
             outgoing += value;
         }
-
-        tx.output.push(TxOut {
-            script_pubkey: ScriptBuf::new_witness_program(
-                &bitcoin::address::WitnessProgram::new(
-                    bitcoin::address::WitnessVersion::V1,
-                    [0u8; 32],
-                )
-                .unwrap(),
-            ),
-            value: 10000,
-        });
-        outgoing += 10000;
 
         fee_amount += fee_rate.fee_wu(tx.weight());
 
@@ -2170,9 +2160,59 @@ impl<D> Wallet<D> {
 
         self.update_psbt_with_descriptor(&mut psbt)?;
 
-        let x = params.recipients;
+        self.update_psbt_with_silent_payments(&mut psbt, &params.recipients);
 
         Ok(psbt)
+    }
+
+    fn update_psbt_with_silent_payments(
+        &self,
+        psbt: &mut psbt::PartiallySignedTransaction,
+        recipients: &[(Recipient, u64)],
+    ) {
+        let silent_payments: HashMap<ScriptBuf, &SilentPaymentAddress> = recipients
+            .iter()
+            .filter_map(|(r, _)| match r {
+                Recipient::SilentPayment(p) => Some((p.placeholder_script_pubkey(), p)),
+                _ => None,
+            })
+            .collect();
+
+        psbt.unsigned_tx.output.iter_mut().for_each(|o| {
+            if let Some(sp) = silent_payments.get(&o.script_pubkey) {
+                println!("###> {:?}", sp);
+                // o.value = 100;
+            }
+        });
+
+        let key_map = self
+            .signers
+            .as_key_map(&self.secp)
+            .values()
+            .filter_map(|sk| match sk {
+                DescriptorSecretKey::XPrv(xprv) => {
+                    // println!("Origin: {:?}", xprv.origin); // TODO: see sign_input
+                    Some((xprv.root_fingerprint(&self.secp), xprv.xkey))
+                }
+                _ => None,
+            })
+            .collect::<HashMap<_, _>>();
+
+        psbt.inputs
+            .iter()
+            .zip(psbt.unsigned_tx.input.iter())
+            .for_each(|(psbt_input, tx_input)| {
+                let der = &psbt_input.bip32_derivation;
+
+                // TODO: if der has more than 1 element, skip
+
+                let (pk, (fp, dp)) = der.first_key_value().unwrap();
+                let sk = key_map.get(fp).unwrap();
+                println!("{:?} {:?}", sk, dp);
+                let x = sk.derive_priv(&self.secp, dp).unwrap().to_priv();
+                println!("{x:#?}");
+                println!("{pk} == {}", x.public_key(&self.secp));
+            });
     }
 
     /// get the corresponding PSBT Input for a LocalUtxo

@@ -3,6 +3,7 @@ use std::fmt::Debug;
 use std::str::FromStr;
 
 use bdk::bitcoin::Network::*;
+use bdk::wallet::tx_builder::SilentPaymentAddress;
 use bdk::wallet::AddressIndex::New;
 use bdk::Wallet;
 use bdk_chain::{BlockId, ConfirmationTime, PersistBackend};
@@ -18,9 +19,14 @@ pub fn main() {
 
     let mut builder = wallet.build_tx();
     builder.add_recipient(addr, 10000);
+    builder.add_recipient(SilentPaymentAddress, 12000);
     let mut psbt = builder.finish().unwrap();
 
-    println!("{:#?}", psbt);
+    // println!("{:#?}", psbt);
+
+    let tx = psbt.extract_tx();
+
+    // println!("{:#?}", tx);
 
     // let x = wallet.sign(&mut psbt, Default::default());
     // println!("{:?}", x);
@@ -37,6 +43,10 @@ fn mk_wallet() -> Wallet<()> {
     )
     .unwrap();
 
+    let _ = wallet.get_address(New);
+    let _ = wallet.get_address(New);
+    let _ = wallet.get_address(New);
+    
     let change_address = wallet.get_address(New).address;
     let sendto_address = Address::from_str("tb1qk2clpn6qht0d5vu4ddqtxw9ddx2jlartgxtync")
         .expect("address")
