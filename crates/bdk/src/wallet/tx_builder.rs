@@ -44,6 +44,8 @@ use crate::collections::BTreeMap;
 use crate::collections::HashSet;
 use alloc::{boxed::Box, rc::Rc, string::String, vec::Vec};
 use bdk_chain::PersistBackend;
+use bitcoin::Address;
+use bitcoin::Script;
 use core::cell::RefCell;
 use core::fmt;
 use core::marker::PhantomData;
@@ -133,11 +135,55 @@ pub struct TxBuilder<'a, D, Cs, Ctx> {
     pub(crate) phantom: PhantomData<Ctx>,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct SilentPaymentAddress;
+
+impl SilentPaymentAddress {
+    pub fn placeholder_script_pubkey(&self) -> ScriptBuf {
+        todo!()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum Recipient {
+    ScriptPubKey(ScriptBuf),
+    Address(Address),
+    SilentPayment(SilentPaymentAddress),
+}
+
+impl Recipient {
+    pub fn script_pubkey(&self) -> Option<ScriptBuf> {
+        match self {
+            Recipient::ScriptPubKey(s) => Some(s.clone()),
+            Recipient::Address(a) => Some(a.script_pubkey()),
+            Recipient::SilentPayment(_) => None,
+        }
+    }
+}
+
+impl Into<Recipient> for ScriptBuf {
+    fn into(self) -> Recipient {
+        Recipient::ScriptPubKey(self)
+    }
+}
+
+impl Into<Recipient> for Address {
+    fn into(self) -> Recipient {
+        Recipient::Address(self)
+    }
+}
+
+impl Into<Recipient> for SilentPaymentAddress {
+    fn into(self) -> Recipient {
+        Recipient::SilentPayment(self)
+    }
+}
+
 /// The parameters for transaction creation sans coin selection algorithm.
 //TODO: TxParams should eventually be exposed publicly.
 #[derive(Default, Debug, Clone)]
 pub(crate) struct TxParams {
-    pub(crate) recipients: Vec<(ScriptBuf, u64)>,
+    pub(crate) recipients: Vec<(Recipient, u64)>,
     pub(crate) drain_wallet: bool,
     pub(crate) drain_to: Option<ScriptBuf>,
     pub(crate) fee_policy: Option<FeePolicy>,
@@ -704,20 +750,19 @@ impl std::error::Error for AllowShrinkingError {}
 impl<'a, D, Cs: CoinSelectionAlgorithm> TxBuilder<'a, D, Cs, CreateTx> {
     /// Replace the recipients already added with a new list
     pub fn set_recipients(&mut self, recipients: Vec<(ScriptBuf, u64)>) -> &mut Self {
-        self.params.recipients = recipients;
+        //TODO: self.params.recipients = recipients;
         self
     }
 
     /// Add a recipient to the internal list
-    pub fn add_recipient(&mut self, script_pubkey: ScriptBuf, amount: u64) -> &mut Self {
-        self.params.recipients.push((script_pubkey, amount));
+    pub fn add_recipient<R: Into<Recipient>>(&mut self, recipient: R, amount: u64) -> &mut Self {
+        self.params.recipients.push((recipient.into(), amount));
         self
     }
 
     /// Add data as an output, using OP_RETURN
     pub fn add_data<T: AsRef<PushBytes>>(&mut self, data: &T) -> &mut Self {
-        let script = ScriptBuf::new_op_return(data);
-        self.add_recipient(script, 0u64);
+        // TODO: self.add_recipient(data, 0)
         self
     }
 
@@ -798,7 +843,7 @@ impl<'a, D> TxBuilder<'a, D, DefaultCoinSelectionAlgorithm, BumpFee> {
             .params
             .recipients
             .iter()
-            .position(|(recipient_script, _)| *recipient_script == script_pubkey)
+            .position(|(recipient, _)| recipient.script_pubkey().as_ref() == Some(&script_pubkey))
         {
             Some(position) => {
                 self.params.recipients.remove(position);

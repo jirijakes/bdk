@@ -17,7 +17,7 @@ pub fn main() {
         .assume_checked();
 
     let mut builder = wallet.build_tx();
-    builder.add_recipient(addr.script_pubkey(), 10000);
+    builder.add_recipient(addr, 10000);
     let mut psbt = builder.finish().unwrap();
 
     println!("{:#?}", psbt);
@@ -27,12 +27,12 @@ pub fn main() {
 }
 
 #[rustfmt::skip]
-fn mk_wallet() -> Wallet<Whisper> {
+fn mk_wallet() -> Wallet<()> {
     let mut wallet = Wallet::new(
         // bitcoin::bip32::ExtendedPrivKey::new_master(Signet, &[0]).unwrap()
         "wpkh(tprv8ZgxMBicQKsPexv3jfDTHG3s59Gh6VwRcgpFzaDG125BnAFyU2MU1h2NbNFqgkgyTds9jy1kxA4tZYcoVh5M1rbLR2aWeUto9iX99XsBmT9/*)",
         None,
-        Whisper,
+        (),
         Signet,
     )
     .unwrap();

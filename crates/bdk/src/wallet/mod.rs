@@ -28,14 +28,20 @@ use bdk_chain::{
     Append, BlockId, ChainPosition, ConfirmationTime, ConfirmationTimeHeightAnchor, FullTxOut,
     IndexedTxGraph, Persist, PersistBackend,
 };
-use bitcoin::secp256k1::{All, Secp256k1};
-use bitcoin::sighash::{EcdsaSighashType, TapSighashType};
 use bitcoin::{
     absolute, Address, Network, OutPoint, Script, ScriptBuf, Sequence, Transaction, TxOut, Txid,
     Weight, Witness,
 };
 use bitcoin::{consensus::encode::serialize, BlockHash};
 use bitcoin::{constants::genesis_block, psbt};
+use bitcoin::{
+    hashes::sha256,
+    secp256k1::{All, Secp256k1},
+};
+use bitcoin::{
+    sighash::{EcdsaSighashType, TapSighashType},
+    PublicKey,
+};
 use core::fmt;
 use core::ops::Deref;
 use descriptor::error::Error as DescriptorError;
@@ -1386,17 +1392,26 @@ impl<D> Wallet<D> {
 
         let recipients = params.recipients.iter().map(|(r, v)| (r, *v));
 
-        for (index, (script_pubkey, value)) in recipients.enumerate() {
+        for (index, (recipient, value)) in recipients.enumerate() {
+            let script_pubkey = match recipient {
+                tx_builder::Recipient::ScriptPubKey(spk) => spk.clone(),
+                tx_builder::Recipient::Address(a) => a.script_pubkey(),
+                tx_builder::Recipient::SilentPayment(sp) => sp.placeholder_script_pubkey(),
+            };
             if !params.allow_dust
-                && value.is_dust(script_pubkey)
+                && value.is_dust(&script_pubkey)
                 && !script_pubkey.is_provably_unspendable()
             {
                 return Err(CreateTxError::OutputBelowDustLimit(index));
             }
 
-            if self.is_mine(script_pubkey) {
+            if self.is_mine(&script_pubkey) {
                 received += value;
             }
+
+            let a: [u8; 8] = (index as u64).to_be_bytes();
+            let mut x = [0u8; 32];
+            x[24..].copy_from_slice(&a);
 
             let new_out = TxOut {
                 script_pubkey: script_pubkey.clone(),
@@ -1407,6 +1422,18 @@ impl<D> Wallet<D> {
 
             outgoing += value;
         }
+
+        tx.output.push(TxOut {
+            script_pubkey: ScriptBuf::new_witness_program(
+                &bitcoin::address::WitnessProgram::new(
+                    bitcoin::address::WitnessVersion::V1,
+                    [0u8; 32],
+                )
+                .unwrap(),
+            ),
+            value: 10000,
+        });
+        outgoing += 10000;
 
         fee_amount += fee_rate.fee_wu(tx.weight());
 
@@ -1686,7 +1713,7 @@ impl<D> Wallet<D> {
             recipients: tx
                 .output
                 .into_iter()
-                .map(|txout| (txout.script_pubkey, txout.value))
+                .map(|txout| (txout.script_pubkey.into(), txout.value))
                 .collect(),
             utxos: original_utxos,
             bumping_fee: Some(tx_builder::PreviousFee {
@@ -2142,6 +2169,8 @@ impl<D> Wallet<D> {
         }
 
         self.update_psbt_with_descriptor(&mut psbt)?;
+
+        let x = params.recipients;
 
         Ok(psbt)
     }
