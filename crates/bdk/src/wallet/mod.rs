@@ -28,6 +28,7 @@ use bdk_chain::{
     Append, BlockId, ChainPosition, ConfirmationTime, ConfirmationTimeHeightAnchor, FullTxOut,
     IndexedTxGraph, Persist, PersistBackend,
 };
+use bip352::{address::SilentPaymentAddress, sender::SilentPayment};
 use bitcoin::{
     absolute, Address, Network, OutPoint, Script, ScriptBuf, Sequence, Transaction, TxOut, Txid,
     Weight, Witness,
@@ -82,7 +83,7 @@ use crate::types::*;
 use crate::wallet::coin_selection::Excess::{Change, NoChange};
 use crate::wallet::error::{BuildFeeBumpError, CreateTxError, MiniscriptPsbtError};
 
-use self::tx_builder::{Recipient, SilentPaymentAddress};
+use self::tx_builder::Recipient;
 
 const COINBASE_MATURITY: u32 = 100;
 
@@ -1397,18 +1398,28 @@ impl<D> Wallet<D> {
 
         let recipients = params.recipients.iter().map(|(r, v)| (r, *v));
 
-        for (index, (recipient, value)) in recipients.enumerate() {
+        for (index, (recipient, value)) in (0u32..).zip(recipients) {
             let script_pubkey = match recipient {
                 Recipient::ScriptPubKey(spk) => spk.clone(),
                 Recipient::Address(a) => a.script_pubkey(),
-                Recipient::SilentPayment(sp) => sp.placeholder_script_pubkey(),
+                Recipient::SilentPayment(sp) => {
+                    let mut placeholder = [0u8; 32];
+                    placeholder[..4].copy_from_slice(&index.to_be_bytes());
+                    ScriptBuf::new_witness_program(
+                        &bitcoin::address::WitnessProgram::new(
+                            bitcoin::address::WitnessVersion::V1,
+                            placeholder,
+                        )
+                        .unwrap(),
+                    )
+                }
             };
 
             if !params.allow_dust
                 && value.is_dust(&script_pubkey)
                 && !script_pubkey.is_provably_unspendable()
             {
-                return Err(CreateTxError::OutputBelowDustLimit(index));
+                return Err(CreateTxError::OutputBelowDustLimit(index as usize));
             }
 
             if self.is_mine(&script_pubkey) {
@@ -2170,13 +2181,36 @@ impl<D> Wallet<D> {
         psbt: &mut psbt::PartiallySignedTransaction,
         recipients: &[(Recipient, u64)],
     ) {
-        let silent_payments: HashMap<ScriptBuf, &SilentPaymentAddress> = recipients
-            .iter()
-            .filter_map(|(r, _)| match r {
-                Recipient::SilentPayment(p) => Some((p.placeholder_script_pubkey(), p)),
+        let silent_payments: HashMap<ScriptBuf, &SilentPaymentAddress> = (0u32..)
+            .zip(recipients)
+            .filter_map(|(index, (r, _))| match r {
+                Recipient::SilentPayment(p) => {
+                    let mut placeholder = [0u8; 32];
+                    placeholder[..4].copy_from_slice(&index.to_be_bytes());
+                    let script = ScriptBuf::new_witness_program(
+                        &bitcoin::address::WitnessProgram::new(
+                            bitcoin::address::WitnessVersion::V1,
+                            placeholder,
+                        )
+                        .unwrap(),
+                    );
+                    Some((script, p))
+                }
                 _ => None,
             })
             .collect();
+
+        let mut builder = SilentPayment::builder(&self.secp);
+
+        silent_payments.values().for_each(|sp| {
+            builder.add_recipient(**sp);
+        });
+
+        psbt.unsigned_tx.input.iter().for_each(|vin| {
+            builder.add_outpoint(vin.previous_output);
+        });
+
+        // let x: Vec<ScriptBuf> = builder.build();
 
         psbt.unsigned_tx.output.iter_mut().for_each(|o| {
             if let Some(sp) = silent_payments.get(&o.script_pubkey) {

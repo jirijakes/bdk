@@ -44,6 +44,7 @@ use crate::collections::BTreeMap;
 use crate::collections::HashSet;
 use alloc::{boxed::Box, rc::Rc, string::String, vec::Vec};
 use bdk_chain::PersistBackend;
+use bip352::address::SilentPaymentAddress;
 use bitcoin::Address;
 use bitcoin::Script;
 use core::cell::RefCell;
@@ -133,18 +134,6 @@ pub struct TxBuilder<'a, D, Cs, Ctx> {
     pub(crate) params: TxParams,
     pub(crate) coin_selection: Cs,
     pub(crate) phantom: PhantomData<Ctx>,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub struct SilentPaymentAddress;
-
-impl SilentPaymentAddress {
-    pub fn placeholder_script_pubkey(&self) -> ScriptBuf {
-        ScriptBuf::new_witness_program(
-            &bitcoin::address::WitnessProgram::new(bitcoin::address::WitnessVersion::V1, [0u8; 32])
-                .unwrap(),
-        )
-    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
