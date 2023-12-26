@@ -1402,7 +1402,9 @@ impl<D> Wallet<D> {
             let script_pubkey = match recipient {
                 Recipient::ScriptPubKey(spk) => spk.clone(),
                 Recipient::Address(a) => a.script_pubkey(),
-                Recipient::SilentPayment(sp) => {
+                Recipient::SilentPayment(_sp) => {
+                    // This way recipients must stay stable (their positions must not change.
+                    // Alternative: combination of silent payment address and amount.
                     let mut placeholder = [0u8; 32];
                     placeholder[..4].copy_from_slice(&index.to_be_bytes());
                     ScriptBuf::new_witness_program(
@@ -2181,42 +2183,16 @@ impl<D> Wallet<D> {
         psbt: &mut psbt::PartiallySignedTransaction,
         recipients: &[(Recipient, u64)],
     ) {
-        let silent_payments: HashMap<ScriptBuf, &SilentPaymentAddress> = (0u32..)
-            .zip(recipients)
-            .filter_map(|(index, (r, _))| match r {
-                Recipient::SilentPayment(p) => {
-                    let mut placeholder = [0u8; 32];
-                    placeholder[..4].copy_from_slice(&index.to_be_bytes());
-                    let script = ScriptBuf::new_witness_program(
-                        &bitcoin::address::WitnessProgram::new(
-                            bitcoin::address::WitnessVersion::V1,
-                            placeholder,
-                        )
-                        .unwrap(),
-                    );
-                    Some((script, p))
-                }
-                _ => None,
-            })
-            .collect();
+        let mut silent_payment = SilentPayment::builder(&self.secp);
 
-        let mut builder = SilentPayment::builder(&self.secp);
-
-        silent_payments.values().for_each(|sp| {
-            builder.add_recipient(**sp);
+        recipients.iter().for_each(|(r, _amount)| {
+            if let Recipient::SilentPayment(sp) = r {
+                silent_payment.add_recipient(*sp);
+            }
         });
 
         psbt.unsigned_tx.input.iter().for_each(|vin| {
-            builder.add_outpoint(vin.previous_output);
-        });
-
-        // let x: Vec<ScriptBuf> = builder.build();
-
-        psbt.unsigned_tx.output.iter_mut().for_each(|o| {
-            if let Some(sp) = silent_payments.get(&o.script_pubkey) {
-                println!("###> {:?}", sp);
-                // o.value = 100;
-            }
+            silent_payment.add_outpoint(vin.previous_output);
         });
 
         let key_map = self
@@ -2235,18 +2211,50 @@ impl<D> Wallet<D> {
         psbt.inputs
             .iter()
             .zip(psbt.unsigned_tx.input.iter())
-            .for_each(|(psbt_input, tx_input)| {
+            .for_each(|(psbt_input, _tx_input)| {
                 let der = &psbt_input.bip32_derivation;
 
                 // TODO: if der has more than 1 element, skip
 
-                let (pk, (fp, dp)) = der.first_key_value().unwrap();
-                let sk = key_map.get(fp).unwrap();
-                println!("{:?} {:?}", sk, dp);
-                let x = sk.derive_priv(&self.secp, dp).unwrap().to_priv();
-                println!("{x:#?}");
-                println!("{pk} == {}", x.public_key(&self.secp));
+                let (_pk, (fp, dp)) = der.first_key_value().unwrap();
+                let xpriv = key_map.get(fp).unwrap();
+                let sk = xpriv.derive_priv(&self.secp, dp).unwrap().to_priv();
+
+                // TODO: Verify public key of tx_input
+
+                silent_payment.add_private_key(sk);
             });
+
+        let outputs: Vec<ScriptBuf> = silent_payment.build();
+
+        let outputs = recipients
+            .iter()
+            .zip(0u32..)
+            .filter_map(|((r, _amount), index)| {
+                if matches!(r, Recipient::SilentPayment(_)) {
+                    let mut placeholder = [0u8; 32];
+                    placeholder[..4].copy_from_slice(&index.to_be_bytes());
+                    let spk = ScriptBuf::new_witness_program(
+                        &bitcoin::address::WitnessProgram::new(
+                            bitcoin::address::WitnessVersion::V1,
+                            placeholder,
+                        )
+                        .unwrap(),
+                    );
+                    Some(spk)
+                } else {
+                    None
+                }
+            })
+            .zip(outputs.into_iter())
+            .inspect(|x| println!("{x:#?}"))
+            .collect::<HashMap<_, _>>();
+
+        psbt.unsigned_tx.output.iter_mut().for_each(|o| {
+            if let Some(sp) = outputs.get(&o.script_pubkey) {
+                o.script_pubkey = sp.clone();
+            }
+        });
     }
 
     /// get the corresponding PSBT Input for a LocalUtxo
